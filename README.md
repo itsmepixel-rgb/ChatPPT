@@ -138,16 +138,3 @@ The model lists in the UI include useful defaults. Users can fetch live model li
 ## Project Files
 
 The app autosaves the active deck in browser storage. For long-term storage or collaboration, export a Project JSON file and re-import it later from the home screen or editor toolbar.
-
-## Open Source Notes
-
-Before publishing on GitHub:
-
-- Add a license file, such as `MIT`.
-- Add screenshots or a short demo GIF.
-- Review the Gemini model names in `server.ts` for your preferred production models.
-- Decide whether to keep `"private": true` in `package.json`; set it to `false` only if you intend to publish the package to npm.
-
-## Security
-
-Do not commit `.env` files or real API keys. The included `.gitignore` excludes common environment files. Browser-saved API keys are convenient for local use, but they are still stored on the user's machine; do not use shared browsers for sensitive keys.
