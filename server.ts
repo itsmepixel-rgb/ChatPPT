@@ -7,6 +7,10 @@ import { GoogleGenAI } from "@google/genai";
 dotenv.config();
 
 const app = express();
+app.use((req, res, next) => {
+  console.log("Vercel req details:", { url: req.url, originalUrl: req.originalUrl, path: req.path });
+  next();
+});
 app.use(express.json({ limit: "25mb" }));
 
   type Provider = "gemini" | "openai" | "claude" | "ollama";
@@ -1505,7 +1509,7 @@ The JSON format must be EXACTLY: [
     const PORT = Number(process.env.PORT) || 3000;
 
     // Vite middleware for development
-    if (process.env.NODE_ENV !== "production") {
+    if (process.env.NODE_ENV !== "production" && !process.env.VERCEL) {
       const { createServer } = await import("vite");
       const vite = await createServer({
         server: { middlewareMode: true },
@@ -1515,7 +1519,7 @@ The JSON format must be EXACTLY: [
     } else {
       const distPath = path.join(process.cwd(), 'dist');
       app.use(express.static(distPath));
-      app.get('*', (req, res) => {
+      app.get(/^(?!\/api).*/, (req, res) => {
         res.sendFile(path.join(distPath, 'index.html'));
       });
     }
