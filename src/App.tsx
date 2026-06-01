@@ -10,13 +10,14 @@ import {
   Pipette, X, Menu, ChevronDown as DropdownIcon, Heading,
   RefreshCw, Code2, Undo, Redo, FileCode, Save, FileUp,
   StickyNote, BarChart3, ShieldCheck, Settings, KeyRound,
-  ServerCog, PlugZap, Terminal, Lock, Unlock
+  ServerCog, PlugZap, Terminal, Lock, Unlock, Globe, Search, Maximize2, ExternalLink, Smartphone, Monitor
 } from 'lucide-react';
 
 import { toJpeg } from 'html-to-image';
 import JSZip from 'jszip';
 import PptxGenJS from 'pptxgenjs';
 import { AsciiBackground } from './AsciiBackground';
+import { INSTANT_TEMPLATES, generateRandomBackground } from './utils/vectorBgGenerator';
 import Markdown from 'react-markdown';
 
 declare global {
@@ -86,7 +87,24 @@ Schema: { "title": "Main Title", "slides": [ { "type": "title", "title": "...", 
                 systemInstruction = "You are an AI writing assistant for presentation slides. Return ONLY the final generated text. Do not include quotes, markdown formatting, or conversational filler.";
                 promptObj = { role: 'user', parts: [{ text: `Instruction: ${body.instruction}\n\nCurrent Text:\n${body.currentText || "(None)"}` }] };
              } else if (url === '/api/ai/chat') {
-                systemInstruction = "You are a brainstorming assistant for presentations. Provide concise, clear text that can easily be copied directly into a presentation slide.";
+                systemInstruction = `You are an expert presentation designer and assistant. Respond with a JSON object:
+{
+  "reply": "Conversational reply answering user or describing action.",
+  "command": null or {
+    "action": "CREATE_DECK" | "ADD_SLIDE" | "ADD_ELEMENT" | "SET_THEME" | "UPDATE_ELEMENT" | "UPDATE_SLIDE" | "CLEAR_PROJECT" | "REMOVE_SLIDE",
+    "payload": { ... }
+  }
+}
+
+Command Specifications:
+1. CREATE_DECK: generate full deck
+2. ADD_SLIDE: append formatted slide
+3. ADD_ELEMENT: add slide element
+4. SET_THEME: change slide themeId
+5. UPDATE_ELEMENT: custom hex text color, size/weight/align with 'scope': "active" | "all_titles" | "all_body" | "all"
+6. UPDATE_SLIDE: change active customBgColor hex
+7. CLEAR_PROJECT: reset slides
+8. REMOVE_SLIDE: delete slideIndex (1-based) or active`;
                 promptObj = { role: 'user', parts: [{ text: JSON.stringify(body.messages) }] }; 
              }
              
@@ -96,7 +114,7 @@ Schema: { "title": "Main Title", "slides": [ { "type": "title", "title": "...", 
                 body: JSON.stringify({
                    systemInstruction: { parts: [{text: systemInstruction}] },
                    contents: [promptObj],
-                   generationConfig: { responseMimeType: url === '/api/ai/deck' ? 'application/json' : 'text/plain' }
+                   generationConfig: { responseMimeType: (url === '/api/ai/deck' || url === '/api/ai/chat') ? 'application/json' : 'text/plain' }
                 })
              });
              const gData = await geminiRes.json();
@@ -104,6 +122,14 @@ Schema: { "title": "Main Title", "slides": [ { "type": "title", "title": "...", 
              const genText = gData.candidates?.[0]?.content?.parts?.[0]?.text || "";
              
              if (url === '/api/ai/deck') return JSON.parse(genText);
+             if (url === '/api/ai/chat') {
+                try {
+                   const parsed = JSON.parse(genText.trim());
+                   return { text: parsed.reply, command: parsed.command || null };
+                } catch {
+                   return { text: genText.trim(), command: null };
+                 }
+             }
              return { text: genText.trim() };
           }
           
@@ -403,6 +429,36 @@ export default function GammaCloudReplica() {
   const [isBuildingApp, setIsBuildingApp] = useState(false);
   const [isConvertingAscii, setIsConvertingAscii] = useState<string | null>(null);
 
+  // Browser Tab & Image Search State
+  const [browserSearchInput, setBrowserSearchInput] = useState('');
+  const [browserSearchQuery, setBrowserSearchQuery] = useState('');
+  const [browserSearchType, setBrowserSearchType] = useState<'wikimedia' | 'wikipedia' | 'google'>('wikimedia');
+  const [browserCurrentPage, setBrowserCurrentPage] = useState('home'); // 'home' | 'results'
+  const [browserSearchResults, setBrowserSearchResults] = useState<any[]>([]);
+  const [isBrowserSearching, setIsBrowserSearching] = useState(false);
+  const [browserSearchError, setBrowserSearchError] = useState('');
+  const [browserViewportMode, setBrowserViewportMode] = useState<'mobile' | 'desktop'>('mobile');
+  const [imageDropdownOpen, setImageDropdownOpen] = useState<string | null>(null); // holds image ID
+
+  useEffect(() => {
+    const handleBrowserMessage = (e: MessageEvent) => {
+      if (!e.data || typeof e.data !== 'object') return;
+      const { type, src, url } = e.data;
+      const currentSlideIndex = slides.findIndex(s => s.id === activeSlideId);
+      if (type === 'BROWSER_IMAGE_SELECT') {
+        insertImageToSlide(src, currentSlideIndex);
+      } else if (type === 'BROWSER_IMAGE_BG_SELECT') {
+        setImageAsSlideBackground(src, currentSlideIndex);
+      } else if (type === 'PROXY_NAVIGATE') {
+        setBrowserSearchQuery(url);
+        setBrowserSearchInput(url);
+        setBrowserCurrentPage('home');
+      }
+    };
+    window.addEventListener('message', handleBrowserMessage);
+    return () => window.removeEventListener('message', handleBrowserMessage);
+  }, [slides, activeSlideId]);
+
   const convertImageToAscii = async (src: string, elementId: string) => {
     setIsConvertingAscii(elementId);
     try {
@@ -513,6 +569,9 @@ export default function GammaCloudReplica() {
   const [snapGuides, setSnapGuides] = useState([]);
   const [isGeneratingSlideBg, setIsGeneratingSlideBg] = useState(false);
   const [slideBgPrompt, setSlideBgPrompt] = useState('');
+  const [vectorBgPrompt, setVectorBgPrompt] = useState('');
+  const [isGeneratingVectorBg, setIsGeneratingVectorBg] = useState(false);
+  const [bgAppliedToAll, setBgAppliedToAll] = useState(false);
   const [draggedSlideIndex, setDraggedSlideIndex] = useState(null);
   const [dragOverSlideIndex, setDragOverSlideIndex] = useState(null);
 
@@ -562,6 +621,7 @@ export default function GammaCloudReplica() {
 
   // Computed Backgrounds
   const resolveSlideBackground = (slide) => {
+    if (slide?.customBgStyle) return slide.customBgStyle;
     if (slide?.customBgColor) return slide.customBgColor;
     if (customGlobalBgColor) return customGlobalBgColor;
     return activeTheme.bg;
@@ -814,13 +874,71 @@ export default function GammaCloudReplica() {
     setIsGeneratingSlideBg(true);
     try {
       const imageUrl = await generateImage(slideBgPrompt, sanitizeAiSettings());
-      updateActiveSlide({ bgImage: imageUrl, customBgColor: null, bgOpacity: 1 });
+      updateActiveSlide({ bgImage: imageUrl, customBgColor: null, customBgStyle: null, bgOpacity: 1 });
       setSlideBgPrompt('');
     } catch (err) {
       alert("Slide background generation failed.");
     } finally {
       setIsGeneratingSlideBg(false);
     }
+  };
+
+  const handleGenerateVectorBg = async () => {
+    if (!vectorBgPrompt.trim()) return;
+    setIsGeneratingVectorBg(true);
+    try {
+      const prompt = `Generate a single raw CSS style value that can be assigned directly to HTML style.background. It MUST be an aesthetic, highly polished static grid, gradient, mesh, or pattern background. Always select complementary colors based on the theme description given.
+      
+Theme Description: "${vectorBgPrompt}"
+
+Guidelines:
+- Return ONLY the raw CSS style value (e.g. radial-gradient(...), linear-gradient(...), or background-color with inline circles/grid patterns).
+- If the user requests "splines", "wavy lines", "waves", "ribbons", "waveform", "flowing streams", "sparkles", "stars", or complex vector art, you MUST synthesize a beautiful inline url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1440 900' preserveAspectRatio='none'>...</svg>") containing multiple flowing <path> curves, and/or multiple glowing star/sparkle shapes (e.g. <path d='M0 -12 Q0 0 12 0 Q0 0 0 12 Q0 0 -12 0 Q0 0 0 -12 Z' fill='%23ffffff'/>), or neon dots. 
+- Ensure all '#' symbols inside the SVG string are URL-encoded as '%23' to make it valid inside the browser background-image CSS.
+- Do NOT include quotes, wrapping CSS classes (like body { ... }), markdown formatting block ticks like \`\`\`css, or comments.
+- Must be a valid CSS string representing the "background" property.
+- Try to make it modern, responsive, and visually beautiful (like shadcn landing components or linear gradient overlays).`;
+
+      // Use the existing rewrite endpoint to get the result!
+      const data = await postJSON('/api/ai/rewrite', { 
+        currentText: "", 
+        instruction: prompt, 
+        aiSettings: sanitizeAiSettings() 
+      });
+
+      if (data && data.text) {
+        let cleanCss = data.text.trim();
+        // Remove enclosing backticks if any
+        if (cleanCss.startsWith("```")) {
+          cleanCss = cleanCss.replace(/^```(css|html|text)?/i, "").replace(/```$/i, "").trim();
+        }
+        // Remove trailing or leading quotes
+        cleanCss = cleanCss.replace(/^['"]|['"]$/g, "").trim();
+        
+        updateActiveSlide({ 
+          customBgStyle: cleanCss, 
+          customBgColor: null, 
+          bgImage: null 
+        });
+        setVectorBgPrompt('');
+      } else {
+        throw new Error("No CSS background text returned from AI.");
+      }
+    } catch (err: any) {
+      console.error(err);
+      alert("SVG/CSS Background Synthesis failed: " + err.message);
+    } finally {
+      setIsGeneratingVectorBg(false);
+    }
+  };
+
+  const handleRandomizeVectorBg = () => {
+    const { style } = generateRandomBackground();
+    updateActiveSlide({ 
+      customBgStyle: style, 
+      customBgColor: null, 
+      bgImage: null 
+    });
   };
 
   const handleAITextRewrite = async (instruction) => {
@@ -848,7 +966,274 @@ export default function GammaCloudReplica() {
     try {
       const response = await postJSON('/api/ai/chat', { messages: newMsgs, aiSettings: sanitizeAiSettings() });
       const textResp = response.text;
-      setChatMessages([...newMsgs, { role: 'ai', text: textResp || "Sorry, I couldn't generate a response." }]);
+      
+      const newAiMsg = { role: 'ai' as const, text: textResp || "Sorry, I couldn't generate a response." };
+      setChatMessages([...newMsgs, newAiMsg]);
+
+      if (response.command) {
+        const { action, payload } = response.command;
+        try {
+          if (action === 'CREATE_DECK') {
+            const { title: deckTitleVal, slides: cmdSlides } = payload;
+            if (cmdSlides && cmdSlides.length > 0) {
+              setDeckTitle(deckTitleVal || "Generated Presentation");
+              const newSlides = cmdSlides.map((s: any, index: number) => {
+                const elements = [];
+                if (index === 0 || s.type === 'title') {
+                  elements.push({ id: generateId(), type: 'text', textRole: 'title', text: s.title, x: 10, y: 20, w: 80, h: 35, align: 'center', useThemeColor: true });
+                  if (s.subtitle) elements.push({ id: generateId(), type: 'text', textRole: 'subtitle', text: s.subtitle, x: 10, y: 60, w: 80, h: 25, align: 'center', opacity: 0.8, useThemeColor: true });
+                } else {
+                  elements.push({ id: generateId(), type: 'text', textRole: 'contentTitle', text: s.title, x: 8, y: 8, w: 84, h: 20, align: 'left', useThemeColor: true });
+                  const bodyText = s.content || (s.bullets ? s.bullets.map((b: any) => `• ${b}`).join('\n\n') : '• Add content here');
+                  if (s.requiresImage) {
+                    elements.push({ id: generateId(), type: 'text', textRole: 'body', text: bodyText, x: 8, y: 35, w: 45, h: 56, align: 'left', opacity: 0.9, useThemeColor: true });
+                    elements.push({ id: generateId(), type: 'imagePlaceholder', prompt: s.imagePrompt, x: 55, y: 35, w: 37, h: 56 });
+                  } else {
+                    elements.push({ id: generateId(), type: 'text', textRole: 'body', text: bodyText, x: 8, y: 35, w: 84, h: 56, align: 'left', opacity: 0.9, useThemeColor: true });
+                  }
+                }
+                return { id: generateId(), elements, notes: s.speakerNotes || '' };
+              });
+              setSlides(newSlides);
+              setActiveSlideId(newSlides[0].id);
+              setAppState('editor');
+              setChatMessages(prev => [
+                ...prev,
+                { role: 'ai', text: `✨ Created slide deck "${deckTitleVal || "Presentation"}" with ${newSlides.length} slides successfully!` }
+              ]);
+            }
+          } else if (action === 'ADD_SLIDE') {
+            const { title: sTitle, content: sContent, speakerNotes: sNotes, requiresImage: sImg, imagePrompt: sImgPrompt } = payload;
+            const elements = [];
+            elements.push({ id: generateId(), type: 'text', textRole: 'contentTitle', text: sTitle || "New Slide Title", x: 8, y: 8, w: 84, h: 20, align: 'left', useThemeColor: true });
+            const bodyText = sContent || '• Add content here';
+            if (sImg) {
+              elements.push({ id: generateId(), type: 'text', textRole: 'body', text: bodyText, x: 8, y: 35, w: 45, h: 56, align: 'left', opacity: 0.9, useThemeColor: true });
+              elements.push({ id: generateId(), type: 'imagePlaceholder', prompt: sImgPrompt || "Relevant illustration", x: 55, y: 35, w: 37, h: 56 });
+            } else {
+              elements.push({ id: generateId(), type: 'text', textRole: 'body', text: bodyText, x: 8, y: 35, w: 84, h: 56, align: 'left', opacity: 0.9, useThemeColor: true });
+            }
+            const newSlide = { id: generateId(), elements, notes: sNotes || '' };
+            setSlides(prev => {
+              const updated = [...prev, newSlide];
+              setTimeout(() => setActiveSlideId(newSlide.id), 50);
+              return updated;
+            });
+            setChatMessages(prev => [
+              ...prev,
+              { role: 'ai', text: `✨ Added standard slide "${sTitle || "New Slide"}" to your deck!` }
+            ]);
+          } else if (action === 'ADD_ELEMENT') {
+            const { type: elType, text: elText } = payload;
+            let newEl;
+            if (elType === 'title') {
+              newEl = { id: generateId(), type: 'text', textRole: 'title', text: elText || 'New Title', x: 10, y: 10, w: 80, h: 20, align: 'center', useThemeColor: true };
+            } else if (elType === 'imagePlaceholder') {
+              newEl = { id: generateId(), type: 'imagePlaceholder', prompt: elText || 'Describe an image...', x: 30, y: 20, w: 40, h: 50 };
+            } else {
+              newEl = { id: generateId(), type: 'text', textRole: 'body', text: elText || 'New Text Block', x: 30, y: 40, w: 40, h: 10, align: 'left', useThemeColor: true };
+            }
+            if (activeSlide) {
+              const updatedElements = [...activeSlide.elements, newEl];
+              const newSlides = [...slides];
+              newSlides[activeSlideIndex] = { ...activeSlide, elements: updatedElements };
+              setSlides(newSlides);
+              setActiveElementId(newEl.id);
+              setChatMessages(prev => [
+                ...prev,
+                { role: 'ai', text: `➕ Added a new element (${elType}) to the current slide!` }
+              ]);
+            } else {
+              setChatMessages(prev => [
+                ...prev,
+                { role: 'ai', text: `⚠️ Couldn't add element because no slide is currently active.` }
+              ]);
+            }
+          } else if (action === 'SET_THEME') {
+            const { themeId } = payload;
+            const theme = THEMES.find((t: any) => t.id === themeId);
+            if (theme) {
+              setCurrentThemeId(theme.id);
+              setCustomGlobalBgColor('');
+              setGlobalBgImage(null);
+              setGlobalTitleColor('');
+              setGlobalBodyColor('');
+              setGlobalTitleWeight('');
+              setGlobalBodyWeight('');
+              setSlides(prev => prev.map(s => ({
+                ...s,
+                customBgColor: null,
+                bgOpacity: globalBgOpacity
+              })));
+              setChatMessages(prev => [
+                ...prev,
+                { role: 'ai', text: `🎨 Changed the presentation theme to "${theme.name}"!` }
+              ]);
+            }
+          } else if (action === 'UPDATE_ELEMENT') {
+            const { scope, slideIndex, color: elColor, fontSize: elFs, fontWeight: elFw, align: elAlign, text: elText } = payload;
+            const targetScope = scope || 'active';
+
+            const updates: any = {};
+            if (elColor) {
+              updates.color = elColor;
+              updates.useThemeColor = false;
+            }
+            if (elFs) updates.fontSize = elFs;
+            if (elFw) updates.fontWeight = elFw;
+            if (elAlign) updates.align = elAlign;
+
+            if (targetScope === 'active' && (slideIndex === null || slideIndex === undefined)) {
+              if (activeElement) {
+                if (elText) updates.text = elText;
+                updateElement(activeElement.id, updates);
+                setChatMessages(prev => [
+                  ...prev,
+                  { role: 'ai', text: `✨ Successfully updated properties of the active text element!` }
+                ]);
+              } else {
+                setChatMessages(prev => [
+                  ...prev,
+                  { role: 'ai', text: `⚠️ No text box is currently selected. Click on a text box first or ask me to change "all slides" instead!` }
+                ]);
+              }
+            } else {
+              const isSpecificSlide = slideIndex !== null && slideIndex !== undefined;
+              let targetSlideIdx = -1;
+              if (isSpecificSlide) {
+                targetSlideIdx = parseInt(slideIndex as any) - 1;
+                if (targetSlideIdx < 0 || targetSlideIdx >= slides.length) {
+                  setChatMessages(prev => [
+                    ...prev,
+                    { role: 'ai', text: `⚠️ Slide number ${slideIndex} does not exist. (Total slides: ${slides.length})` }
+                  ]);
+                  return;
+                }
+              }
+
+              const isTitleScope = targetScope === 'all_titles' || targetScope === 'slide_titles';
+              const isBodyScope = targetScope === 'all_body' || targetScope === 'slide_body';
+              const isGlobalAll = targetScope === 'all' || targetScope === 'slide_all' || targetScope === 'active';
+
+              const updatedSlides = slides.map((slide, sIdx) => {
+                if (isSpecificSlide && sIdx !== targetSlideIdx) {
+                  return slide;
+                }
+
+                const updatedElements = slide.elements.map(el => {
+                  if (el.type === 'text') {
+                    const isTitleEl = el.textRole === 'title' || el.textRole === 'contentTitle';
+                    const matchTitle = isTitleScope && isTitleEl;
+                    const matchBody = isBodyScope && !isTitleEl;
+                    const matchAll = isGlobalAll;
+
+                    if (matchTitle || matchBody || matchAll) {
+                      return { ...el, ...updates };
+                    }
+                  }
+                  return el;
+                });
+                return { ...slide, elements: updatedElements };
+              });
+
+              setSlides(updatedSlides);
+
+              let scopeLabel = "all text elements";
+              if (isTitleScope) scopeLabel = "all slide title elements";
+              if (isBodyScope) scopeLabel = "all slide body/bullet elements";
+              
+              const slideContextInfo = isSpecificSlide ? `on Slide ${slideIndex}` : `across all ${slides.length} slides`;
+
+              setChatMessages(prev => [
+                ...prev,
+                { role: 'ai', text: `✨ Successfully updated ${scopeLabel} ${slideContextInfo} with your styles!` }
+              ]);
+            }
+          } else if (action === 'UPDATE_SLIDE') {
+            const { customBgColor, slideIndex } = payload;
+            const isSpecificSlide = slideIndex !== null && slideIndex !== undefined;
+
+            if (isSpecificSlide) {
+              const targetSlideIdx = parseInt(slideIndex as any) - 1;
+              if (targetSlideIdx < 0 || targetSlideIdx >= slides.length) {
+                setChatMessages(prev => [
+                  ...prev,
+                  { role: 'ai', text: `⚠️ Slide number ${slideIndex} does not exist. (Total slides: ${slides.length})` }
+                ]);
+                return;
+              }
+              const newSlides = [...slides];
+              newSlides[targetSlideIdx] = { ...newSlides[targetSlideIdx], customBgColor, bgImage: null };
+              setSlides(newSlides);
+              setChatMessages(prev => [
+                ...prev,
+                { role: 'ai', text: `🎨 Changed slide ${slideIndex}'s background color to ${customBgColor}!` }
+              ]);
+            } else {
+              if (activeSlide) {
+                updateActiveSlide({ customBgColor, bgImage: null });
+                setChatMessages(prev => [
+                  ...prev,
+                  { role: 'ai', text: `🎨 Changed the active slide background to ${customBgColor}!` }
+                ]);
+              } else {
+                setChatMessages(prev => [
+                  ...prev,
+                  { role: 'ai', text: `⚠️ Couldn't change background because no slide is currently active.` }
+                ]);
+              }
+            }
+          } else if (action === 'CLEAR_PROJECT') {
+            const blankSlide = { id: generateId(), notes: '', elements: [{ id: generateId(), type: 'text', textRole: 'title', text: 'Untitled Presentation', x: 10, y: 40, w: 80, h: 20, align: 'center', useThemeColor: true }], customBgColor: null, bgImage: null, bgOpacity: 1 };
+            setDeckTitle('Untitled Presentation');
+            setSlides([blankSlide]);
+            setActiveSlideId(blankSlide.id);
+            setGlobalBgImage(null);
+            setCustomGlobalBgColor('');
+            setChatMessages(prev => [
+              ...prev,
+              { role: 'ai', text: `🗑️ Presentation cleared! Started a standard blank canvas.` }
+            ]);
+          } else if (action === 'REMOVE_SLIDE') {
+            const { slideIndex } = payload;
+            let slideIdToRemove = activeSlideId;
+            let targetNotes = '';
+            
+            if (slideIndex !== null && slideIndex !== undefined) {
+              const idx = parseInt(slideIndex) - 1;
+              if (idx >= 0 && idx < slides.length) {
+                slideIdToRemove = slides[idx].id;
+                targetNotes = `slide #${slideIndex}`;
+              } else {
+                setChatMessages(prev => [
+                  ...prev,
+                  { role: 'ai', text: `⚠️ Slide number ${slideIndex} does not exist. (Total slides: ${slides.length})` }
+                ]);
+                return;
+              }
+            }
+
+            if (slides.length <= 1) {
+              setChatMessages(prev => [
+                ...prev,
+                { role: 'ai', text: `⚠️ Cannot remove slide. Presentation must have at least one slide!` }
+              ]);
+            } else {
+              const updatedSlides = slides.filter(s => s.id !== slideIdToRemove);
+              setSlides(updatedSlides);
+              if (slideIdToRemove === activeSlideId) {
+                setActiveSlideId(updatedSlides[0].id);
+              }
+              setChatMessages(prev => [
+                ...prev,
+                { role: 'ai', text: `🗑️ Removed ${targetNotes || "the current active slide"} successfully!` }
+              ]);
+            }
+          }
+        } catch (actionErr: any) {
+          console.error("Failed to execute chat command:", actionErr);
+        }
+      }
     } catch (err) {
       setChatMessages([...newMsgs, { role: 'ai', text: "Error connecting to AI." }]);
     } finally {
@@ -1125,6 +1510,15 @@ export default function GammaCloudReplica() {
         
         if (slide.bgImage) {
           pptSlide.background = { data: slide.bgImage, transparency: (1 - (slide.bgOpacity ?? 1)) * 100 };
+        } else if (slide.customBgStyle) {
+          // Intelligently extract hex code from CSS gradient style for PPTX fallback
+          const hexMatch = slide.customBgStyle.match(/#[0-9a-fA-F]{6}|#[0-9a-fA-F]{3}/g);
+          if (hexMatch && hexMatch.length > 0) {
+            const fallbackColor = hexMatch[0]; 
+            pptSlide.background = { color: fallbackColor.replace('#', '') };
+          } else {
+            pptSlide.background = { color: activeTheme.solidBg.replace('#', '') };
+          }
         } else if (slide.customBgColor) {
           pptSlide.background = { color: slide.customBgColor.replace('#', '') };
         } else if (globalBgImage) {
@@ -1139,7 +1533,7 @@ export default function GammaCloudReplica() {
           try {
             if (el.type === 'text') {
               const isHeading = el.textRole === 'title' || el.textRole === 'subtitle' || el.textRole === 'contentTitle';
-              const scale = isHeading ? globalTitleScale : globalBodyScale;
+              const scale = (el.textRole === 'title' || el.textRole === 'contentTitle') ? globalTitleScale : globalBodyScale;
               const resolvedFont = el.fontFamily || (isHeading ? (globalTitleFont || activeTheme.titleFont) : (globalBodyFont || activeTheme.bodyFont)) || activeTheme.font;
               
               let baseFontSize = 24;
@@ -1270,7 +1664,7 @@ export default function GammaCloudReplica() {
 
         slide.elements.forEach(el => {
             const isHeading = el.textRole === 'title' || el.textRole === 'subtitle' || el.textRole === 'contentTitle';
-            const scale = isHeading ? globalTitleScale : globalBodyScale;
+            const scale = (el.textRole === 'title' || el.textRole === 'contentTitle') ? globalTitleScale : globalBodyScale;
             const resolvedFont = el.fontFamily || (isHeading ? (globalTitleFont || activeTheme.titleFont) : (globalBodyFont || activeTheme.bodyFont)) || activeTheme.font;
             const baseThemeColor = isHeading ? (globalTitleColor || activeTheme.text) : (globalBodyColor || activeTheme.text);
             const resolvedColor = el.useThemeColor ? baseThemeColor : (el.color || '#000000');
@@ -1574,6 +1968,100 @@ ${tagE}
     setTimeout(() => setBgSyncText('Clear All Slide Backgrounds'), 2000);
   };
 
+  const handleBrowserSearch = async (queryStr: string, overrideType?: 'wikimedia' | 'wikipedia' | 'google') => {
+    const term = queryStr.trim();
+    if (!term) return;
+    
+    const activeType = overrideType || browserSearchType;
+    if (overrideType) {
+      setBrowserSearchType(overrideType);
+    }
+    
+    setIsBrowserSearching(true);
+    setBrowserSearchError('');
+    setBrowserSearchQuery(term);
+    setBrowserCurrentPage('results');
+    
+    try {
+      if (activeType === 'wikimedia') {
+        const res = await fetch(`/api/image-search?q=${encodeURIComponent(term)}`);
+        const data = await res.json();
+        if (data.results) {
+          setBrowserSearchResults(data.results);
+        } else {
+          setBrowserSearchError(data.error || 'No layout images found');
+        }
+      } else {
+        const res = await fetch('/api/web-search', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            q: term,
+            type: activeType,
+            aiSettings: sanitizeAiSettings()
+          })
+        });
+        const data = await res.json();
+        if (data.results) {
+          setBrowserSearchResults(data.results);
+        } else {
+          setBrowserSearchError(data.error || 'No research information found');
+        }
+      }
+    } catch (e: any) {
+      setBrowserSearchError(e?.message || 'Error executing search');
+    } finally {
+      setIsBrowserSearching(false);
+    }
+  };
+
+  const insertImageToSlide = (imageUrl: string, slideIndex: number) => {
+    setSlides(prevSlides => {
+      if (slideIndex < 0 || slideIndex >= prevSlides.length) return prevSlides;
+      const newSlides = [...prevSlides];
+      newSlides[slideIndex] = {
+        ...newSlides[slideIndex],
+        elements: [
+          ...newSlides[slideIndex].elements,
+          {
+            id: generateId(),
+            type: 'image',
+            src: imageUrl,
+            x: 15,
+            y: 15,
+            w: 70,
+            h: 55,
+            objectFit: 'cover' as const
+          }
+        ]
+      };
+      return newSlides;
+    });
+    
+    setChatMessages(prev => [
+      ...prev,
+      { role: 'ai', text: `📸 Embedded image directly on Slide ${slideIndex + 1}! You can click to select and drag/resize it.` }
+    ]);
+  };
+
+  const setImageAsSlideBackground = (imageUrl: string, slideIndex: number) => {
+    setSlides(prevSlides => {
+      if (slideIndex < 0 || slideIndex >= prevSlides.length) return prevSlides;
+      const newSlides = [...prevSlides];
+      newSlides[slideIndex] = {
+         ...newSlides[slideIndex],
+         bgImage: imageUrl,
+         customBgColor: null
+      };
+      return newSlides;
+    });
+    
+    setChatMessages(prev => [
+      ...prev,
+      { role: 'ai', text: `🎨 Configured slide ${slideIndex + 1}'s background image!` }
+    ]);
+  };
+
   // --- Editor Actions ---
   const addSlide = () => {
     const newSlide = {
@@ -1593,6 +2081,23 @@ ${tagE}
     const newSlides = [...slides];
     newSlides[activeSlideIndex] = { ...newSlides[activeSlideIndex], ...updates };
     setSlides(newSlides);
+  };
+
+  const applyActiveBackgroundToAllSlides = () => {
+    if (!activeSlide) return;
+    const { bgImage, customBgColor, customBgStyle, bgOpacity } = activeSlide;
+    const newSlides = slides.map(s => ({
+      ...s,
+      bgImage: bgImage ?? null,
+      customBgColor: customBgColor ?? null,
+      customBgStyle: customBgStyle ?? null,
+      bgOpacity: bgOpacity ?? 1
+    }));
+    setSlides(newSlides);
+    setBgAppliedToAll(true);
+    setTimeout(() => {
+      setBgAppliedToAll(false);
+    }, 2000);
   };
 
   const updateElement = (id, updates) => {
@@ -1818,7 +2323,7 @@ ${tagE}
     const isSelected = el.id === activeElementId && mode === 'canvas';
     
     const isHeading = el.textRole === 'title' || el.textRole === 'subtitle' || el.textRole === 'contentTitle';
-    const scale = isHeading ? globalTitleScale : globalBodyScale;
+    const scale = (el.textRole === 'title' || el.textRole === 'contentTitle') ? globalTitleScale : globalBodyScale;
     const resolvedFont = el.fontFamily || (isHeading ? (globalTitleFont || activeTheme.titleFont) : (globalBodyFont || activeTheme.bodyFont)) || activeTheme.font;
     const baseThemeColor = isHeading ? (globalTitleColor || activeTheme.text) : (globalBodyColor || activeTheme.text);
     const resolvedColor = el.useThemeColor ? baseThemeColor : (el.color || '#000000');
@@ -1836,21 +2341,21 @@ ${tagE}
     // Looser Line Heights for beautiful vertical rendering
     const resolvedLineHeight = (el.textRole === 'title' || el.textRole === 'contentTitle') ? '1.2' : '1.5';
 
-    const baseStyle = {
+    const baseStyle: React.CSSProperties = {
       position: 'absolute',
       left: `${el.x}%`, top: `${el.y}%`, width: `${el.w}%`, 
       ...(el.type === 'text' ? { height: 'auto', minHeight: `${el.h}%` } : { height: `${el.h}%` }),
       cursor: (isPresentation || isThumbnail || isExport) ? 'default' : (isDragging && isSelected ? 'grabbing' : 'grab'),
       border: isSelected && !isExport ? `2px solid ${activeTheme.accent}` : '2px solid transparent',
-      boxSizing: 'border-box',
+      boxSizing: 'border-box' as const,
       transition: (isDragging || resizeState || isExport) ? 'none' : 'all 0.2s ease',
-      fontFamily: resolvedFont,
+      fontFamily: resolvedFont || undefined,
       opacity: el.opacity ?? 1,
       touchAction: 'none',
       zIndex: 1
     };
 
-    const handleStyle = {
+    const handleStyle: React.CSSProperties = {
       position: 'absolute', width: '14px', height: '14px', backgroundColor: '#fff',
       border: `2px solid ${activeTheme.accent}`, borderRadius: '50%', zIndex: 10,
       touchAction: 'none'
@@ -2253,6 +2758,20 @@ ${tagE}
             ref={canvasRef} 
             className="w-full max-w-5xl aspect-video shadow-[0_0_40px_rgba(0,0,0,0.1)] relative overflow-hidden rounded-xl ring-1 ring-gray-200/50 transition-all duration-300" 
             style={{ background: resolveSlideBackground(activeSlide), containerType: 'inline-size' }}
+            onDragOver={(e) => {
+              e.preventDefault();
+              e.dataTransfer.dropEffect = 'copy';
+            }}
+            onDrop={(e) => {
+              e.preventDefault();
+              const imageUrl = e.dataTransfer.getData('image-url') || e.dataTransfer.getData('text/plain');
+              if (imageUrl && imageUrl.startsWith('http')) {
+                const activeIndex = slides.findIndex(s => s.id === activeSlideId);
+                if (activeIndex >= 0) {
+                  insertImageToSlide(imageUrl, activeIndex);
+                }
+              }
+            }}
           >
             {(activeSlide?.bgImage || globalBgImage) && (
               <div className="absolute inset-0 pointer-events-none" style={{ backgroundImage: `url("${activeSlide?.bgImage || globalBgImage}")`, backgroundSize: 'cover', backgroundPosition: 'center', opacity: activeSlide?.bgImage ? (activeSlide?.bgOpacity ?? 1) : globalBgOpacity, zIndex: 0 }} />
@@ -2282,10 +2801,11 @@ ${tagE}
 
         {/* Right Sidebar */}
         <div className={`w-80 max-w-[85vw] ${uiBgPanel} border-l ${uiBorder} flex flex-col shrink-0 absolute right-0 xl:relative z-50 xl:z-10 h-full shadow-[-4px_0_24px_rgba(0,0,0,0.05)] transition-transform duration-300 ${mobileRightOpen ? 'translate-x-0' : 'translate-x-full xl:translate-x-0'}`}>
-          <div className={`grid grid-cols-3 border-b ${uiBorder} p-2 gap-1 ${uiBgSecondary} relative`}>
-            <button onClick={() => setRightPanelTab('format')} className={`py-2 text-[11px] font-semibold rounded-md transition-colors flex items-center justify-center gap-1 ${rightPanelTab === 'format' ? (isDarkMode ? 'bg-[#3a3a3a] text-white shadow-sm' : 'bg-white shadow-sm text-gray-800') : uiTextMuted}`}><Layout className="w-3.5 h-3.5" /> <span className="hidden sm:inline">Format</span></button>
-            <button onClick={() => setRightPanelTab('themes')} className={`py-2 text-[11px] font-semibold rounded-md transition-colors flex items-center justify-center gap-1 ${rightPanelTab === 'themes' ? (isDarkMode ? 'bg-[#3a3a3a] text-white shadow-sm' : 'bg-white shadow-sm text-gray-800') : uiTextMuted}`}><Palette className="w-3.5 h-3.5" /> <span className="hidden sm:inline">Themes</span></button>
-            <button onClick={() => setRightPanelTab('chat')} className={`py-2 text-[11px] font-semibold rounded-md transition-colors flex items-center justify-center gap-1 ${rightPanelTab === 'chat' ? (isDarkMode ? 'bg-[#3a3a3a] text-white shadow-sm' : 'bg-[#1a1a1a] text-gray-300') : uiTextMuted}`}><MessageSquare className="w-3.5 h-3.5" /> <span className="hidden sm:inline">Chat</span></button>
+          <div className={`grid grid-cols-4 border-b ${uiBorder} p-2 gap-1 ${uiBgSecondary} relative`}>
+            <button onClick={() => setRightPanelTab('format')} className={`py-1.5 text-[10px] sm:text-[11px] font-semibold rounded-md transition-colors flex flex-col sm:flex-row items-center justify-center gap-1.5 ${rightPanelTab === 'format' ? (isDarkMode ? 'bg-[#3a3a3a] text-white shadow-sm' : 'bg-white shadow-sm text-gray-800') : uiTextMuted}`}><Layout className="w-3.5 h-3.5" /> <span>Format</span></button>
+            <button onClick={() => setRightPanelTab('themes')} className={`py-1.5 text-[10px] sm:text-[11px] font-semibold rounded-md transition-colors flex flex-col sm:flex-row items-center justify-center gap-1.5 ${rightPanelTab === 'themes' ? (isDarkMode ? 'bg-[#3a3a3a] text-white shadow-sm' : 'bg-white shadow-sm text-gray-800') : uiTextMuted}`}><Palette className="w-3.5 h-3.5" /> <span>Themes</span></button>
+            <button onClick={() => setRightPanelTab('browser')} className={`py-1.5 text-[10px] sm:text-[11px] font-semibold rounded-md transition-colors flex flex-col sm:flex-row items-center justify-center gap-1.5 ${rightPanelTab === 'browser' ? (isDarkMode ? 'bg-[#3a3a3a] text-white shadow-sm' : 'bg-white shadow-sm text-gray-800') : uiTextMuted}`}><Globe className="w-3.5 h-3.5" /> <span>Browser</span></button>
+            <button onClick={() => setRightPanelTab('chat')} className={`py-1.5 text-[10px] sm:text-[11px] font-semibold rounded-md transition-colors flex flex-col sm:flex-row items-center justify-center gap-1.5 ${rightPanelTab === 'chat' ? (isDarkMode ? 'bg-[#3a3a3a] text-white shadow-sm' : 'bg-[#1a1a1a] text-gray-300') : uiTextMuted}`}><MessageSquare className="w-3.5 h-3.5" /> <span>Chat</span></button>
           </div>
 
           <div className="flex-1 overflow-y-auto flex flex-col">
@@ -2374,10 +2894,81 @@ ${tagE}
                       </div>
                       <div>
                         <span className={`text-xs mb-1.5 block ${uiTextMuted}`}>Alignment</span>
-                        <div className={`flex rounded-lg border p-1 ${isDarkMode ? 'bg-[#2a2a2a] border-gray-700' : 'bg-gray-100/50 border-gray-200'}`}>
+                        <div className={`flex rounded-lg border p-1 ${isDarkMode ? 'bg-[#2a2a2a] border-gray-700' : 'bg-gray-100/50 border-gray-200'} mb-3`}>
                           <button onClick={() => updateElement(activeElement.id, { align: 'left' })} className={`flex-1 py-1.5 flex justify-center rounded-md transition-colors ${activeElement.align === 'left' ? (isDarkMode ? 'bg-[#444] shadow text-indigo-400' : 'bg-white shadow text-indigo-600') : uiTextMuted}`}><AlignLeft className="w-4 h-4" /></button>
                           <button onClick={() => updateElement(activeElement.id, { align: 'center' })} className={`flex-1 py-1.5 flex justify-center rounded-md transition-colors ${activeElement.align === 'center' ? (isDarkMode ? 'bg-[#444] shadow text-indigo-400' : 'bg-white shadow text-indigo-600') : uiTextMuted}`}><AlignCenter className="w-4 h-4" /></button>
                           <button onClick={() => updateElement(activeElement.id, { align: 'right' })} className={`flex-1 py-1.5 flex justify-center rounded-md transition-colors ${activeElement.align === 'right' ? (isDarkMode ? 'bg-[#444] shadow text-indigo-400' : 'bg-white shadow text-indigo-600') : uiTextMuted}`}><AlignRight className="w-4 h-4" /></button>
+                        </div>
+                      </div>
+
+                      {/* Global styling overrides */}
+                      <div className="pt-3 border-t border-dashed border-gray-700/25 flex flex-col gap-2">
+                        <span className={`text-[10px] font-bold uppercase tracking-wider ${uiTextMuted}`}>🌐 Global Canvas Apply</span>
+                        <div className="grid grid-cols-2 gap-2">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const { fontFamily, fontSize, fontWeight, color, useThemeColor, align, textRole } = activeElement;
+                              const isActiveTitle = textRole === 'title' || textRole === 'contentTitle';
+                              
+                              setSlides(prevSlides => prevSlides.map(slide => ({
+                                ...slide,
+                                elements: slide.elements.map(el => {
+                                  if (el.type === 'text') {
+                                    const isTargetTitle = el.textRole === 'title' || el.textRole === 'contentTitle';
+                                    if (isActiveTitle === isTargetTitle) {
+                                      return {
+                                        ...el,
+                                        fontFamily,
+                                        fontSize,
+                                        fontWeight,
+                                        color,
+                                        useThemeColor,
+                                        align
+                                      };
+                                    }
+                                  }
+                                  return el;
+                                })
+                              })));
+                              
+                              setChatMessages(prev => [
+                                ...prev,
+                                { role: 'ai', text: `🌐 Set active ${isActiveTitle ? 'Heading' : 'Body'} styles (color, size, weight) to all matching boxes on all slides!` }
+                              ]);
+                            }}
+                            className="py-1.5 px-2 text-[9px] bg-indigo-600 hover:bg-indigo-700 text-white rounded font-semibold transition text-center shadow-sm"
+                          >
+                            Set Style All Slides
+                          </button>
+                          
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const { color, useThemeColor } = activeElement;
+                              setSlides(prevSlides => prevSlides.map(slide => ({
+                                ...slide,
+                                elements: slide.elements.map(el => {
+                                  if (el.type === 'text') {
+                                    return {
+                                      ...el,
+                                      color,
+                                      useThemeColor
+                                    };
+                                  }
+                                  return el;
+                                })
+                              })));
+                              
+                              setChatMessages(prev => [
+                                ...prev,
+                                { role: 'ai', text: `🎨 Updated color of all text fields globally on all slides instantly!` }
+                              ]);
+                            }}
+                            className={`py-1.5 px-2 text-[9px] rounded font-semibold transition text-center border ${isDarkMode ? 'bg-[#2a2a2a] border-gray-700 hover:bg-[#333] text-gray-200' : 'bg-gray-50 border-gray-200 hover:bg-gray-100 text-gray-800'}`}
+                          >
+                            Only Color All Slides
+                          </button>
                         </div>
                       </div>
                     </div>
@@ -2582,15 +3173,92 @@ ${tagE}
                   <p className={`text-xs mb-4 ${uiTextMuted}`}>Customize the background for this specific slide, overriding the global theme.</p>
                   
                   <div className="space-y-4">
+                    {/* --- Code-based Vector & Pattern Background Section --- */}
+                    <div className="p-3.5 rounded-xl border border-indigo-500/20 bg-indigo-500/5 space-y-3">
+                      <div>
+                        <span className={`text-[10px] uppercase font-bold tracking-wider text-indigo-500 flex items-center gap-1.5 mb-1.5`}>
+                          <Code2 className="w-3.5 h-3.5" /> High-Spec Code Vectors
+                        </span>
+                        <p className={`text-[10px] ${uiTextMuted} leading-normal`}>
+                          Instant aesthetic grids, gradients & vector art without image rendering. Very lightweight.
+                        </p>
+                      </div>
+
+                      {/* Infinite Randomizer */}
+                      <button 
+                        onClick={handleRandomizeVectorBg} 
+                        className="w-full py-2 px-3 bg-gradient-to-r from-violet-600 via-indigo-600 to-cyan-600 hover:from-violet-500 hover:via-indigo-500 hover:to-cyan-500 text-white rounded-lg text-xs font-bold shadow-md hover:shadow-lg transition-all flex items-center justify-center gap-2"
+                      >
+                        <Zap className="w-3.5 h-3.5 animate-pulse text-yellow-300 fill-yellow-300" /> 🎲 Generate Infinite Web Vectors
+                      </button>
+
+                      {/* Preset Badges Grid */}
+                      <div>
+                        <span className={`text-[9px] uppercase font-semibold ${uiTextMuted} mb-1.5 block`}>Vector Presets</span>
+                        <div className="grid grid-cols-2 gap-1.5">
+                          {INSTANT_TEMPLATES.map((tmpl) => (
+                            <button
+                              key={tmpl.id}
+                              onClick={() => {
+                                updateActiveSlide({ customBgStyle: tmpl.style, customBgColor: null, bgImage: null });
+                              }}
+                              className={`py-1 px-2 border rounded-md text-[10px] font-semibold text-left transition truncate ${isDarkMode ? 'bg-[#18181b] border-gray-800 hover:border-indigo-500 text-gray-200' : 'bg-white border-gray-200 hover:border-indigo-500 text-gray-700'}`}
+                              title={tmpl.description}
+                            >
+                              {tmpl.name}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* AI Context-Driven Synthesis */}
+                      <div className="space-y-1.5 pt-1.5 border-t border-indigo-500/10">
+                        <span className={`text-[9px] uppercase font-semibold ${uiTextMuted} block`}>AI Vector Synthesis</span>
+                        <div className="flex gap-1.5">
+                          <input 
+                            value={vectorBgPrompt} 
+                            onChange={e => setVectorBgPrompt(e.target.value)}
+                            onKeyDown={e => {
+                              if (e.key === 'Enter') {
+                                handleGenerateVectorBg();
+                              }
+                            }}
+                            placeholder="e.g. Lavender neon grids, warm orange dawn..."
+                            className={`flex-1 text-xs px-2.5 py-1.5 border rounded-lg focus:ring-2 focus:ring-indigo-500 ${isDarkMode ? 'bg-[#2a2a2a] border-gray-700 text-white placeholder-gray-500' : 'bg-white border-gray-200 text-gray-900 placeholder-gray-400'}`}
+                          />
+                          <button 
+                            onClick={handleGenerateVectorBg} 
+                            disabled={isGeneratingVectorBg || !vectorBgPrompt.trim()} 
+                            className="bg-indigo-600 hover:bg-indigo-700 disabled:opacity-40 text-white rounded-lg px-2.5 flex items-center justify-center shadow-sm shrink-0"
+                            title="Synthesize custom background code with AI"
+                          >
+                            {isGeneratingVectorBg ? (
+                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            ) : (
+                              <Wand2 className="w-3.5 h-3.5" />
+                            )}
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Style Inspector panel */}
+                      {activeSlide?.customBgStyle && (
+                        <div className={`p-2 rounded-lg text-[9px] font-mono leading-tight ${isDarkMode ? 'bg-[#121214] text-cyan-400 border border-gray-800' : 'bg-gray-100 text-indigo-700 border border-gray-200'} relative group max-h-[60px] overflow-y-auto overflow-x-hidden select-all custom-scrollbar`}>
+                          <div className="font-bold uppercase text-[8px] text-gray-500 mb-0.5">Custom CSS Applied</div>
+                          {activeSlide.customBgStyle}
+                        </div>
+                      )}
+                    </div>
+
                     {/* Slide Solid Colors */}
                      <div>
                         <span className={`text-[10px] uppercase font-semibold tracking-wider ${uiTextMuted} mb-2 block`}>Solid Color</span>
                         <div className="flex flex-wrap gap-2">
                            {PRESET_COLORS.map(color => (
-                             <button key={color} onClick={() => updateActiveSlide({ customBgColor: color, bgImage: null })} className={`w-6 h-6 rounded-md shadow-sm border ${uiBorder}`} style={{ backgroundColor: color }} />
+                             <button key={color} onClick={() => updateActiveSlide({ customBgColor: color, bgImage: null, customBgStyle: null })} className={`w-6 h-6 rounded-md shadow-sm border ${uiBorder}`} style={{ backgroundColor: color }} />
                            ))}
                            <div className="relative">
-                             <input type="color" value={activeSlide?.customBgColor || '#ffffff'} onChange={e => updateActiveSlide({ customBgColor: e.target.value, bgImage: null })} className="absolute inset-0 opacity-0 w-full h-full cursor-pointer" />
+                             <input type="color" value={activeSlide?.customBgColor || '#ffffff'} onChange={e => updateActiveSlide({ customBgColor: e.target.value, bgImage: null, customBgStyle: null })} className="absolute inset-0 opacity-0 w-full h-full cursor-pointer" />
                              <button className={`w-6 h-6 rounded-md shadow-sm border flex items-center justify-center ${uiBorder} ${uiBgSecondary} ${uiText}`}><Pipette className="w-3.5 h-3.5" /></button>
                            </div>
                         </div>
@@ -2609,17 +3277,38 @@ ${tagE}
                       </button>
                     </div>
 
-                    <input type="file" accept="image/*" ref={slideBgFileInputRef} onChange={handleSlideBgUpload} className="hidden" />
-                    <div className="flex gap-2">
-                      <button onClick={() => slideBgFileInputRef.current?.click()} className={`flex-1 py-2 text-sm font-medium rounded-lg border transition-colors flex items-center justify-center gap-2 ${uiBorder} ${uiHover} ${uiText}`}>
-                        <Upload className="w-4 h-4"/> Local Image
-                      </button>
-                      {(activeSlide?.bgImage || activeSlide?.customBgColor) && (
-                        <button onClick={() => updateActiveSlide({ bgImage: null, customBgColor: null, bgOpacity: 1 })} className={`px-4 py-2 rounded-lg flex items-center justify-center gap-2 transition-colors ${isDarkMode ? 'bg-red-900/20 text-red-400 hover:bg-red-900/40' : 'bg-red-50 text-red-600 hover:bg-red-100'}`} title="Remove slide background">
-                           <Trash2 className="w-4 h-4" />
-                        </button>
-                      )}
-                    </div>
+                     <input type="file" accept="image/*" ref={slideBgFileInputRef} onChange={handleSlideBgUpload} className="hidden" />
+                     <div className="flex gap-2">
+                       <button onClick={() => slideBgFileInputRef.current?.click()} className={`flex-1 py-2 text-sm font-medium rounded-lg border transition-colors flex items-center justify-center gap-2 ${uiBorder} ${uiHover} ${uiText}`}>
+                         <Upload className="w-4 h-4"/> Local Image
+                       </button>
+                       {(activeSlide?.bgImage || activeSlide?.customBgColor || activeSlide?.customBgStyle) && (
+                         <button onClick={() => updateActiveSlide({ bgImage: null, customBgColor: null, customBgStyle: null, bgOpacity: 1 })} className={`px-4 py-2 rounded-lg flex items-center justify-center gap-2 transition-colors ${isDarkMode ? 'bg-red-900/20 text-red-400 hover:bg-red-900/40' : 'bg-red-50 text-red-600 hover:bg-red-100'}`} title="Remove slide background">
+                            <Trash2 className="w-4 h-4" />
+                         </button>
+                       )}
+                     </div>
+
+                     {(activeSlide?.bgImage || activeSlide?.customBgColor || activeSlide?.customBgStyle) && (
+                       <button 
+                         onClick={applyActiveBackgroundToAllSlides}
+                         className={`w-full mt-2 py-2 text-xs font-semibold rounded-lg border transition-all flex items-center justify-center gap-2 ${
+                           bgAppliedToAll 
+                             ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-500' 
+                             : 'bg-indigo-600/10 hover:bg-indigo-600/20 border-indigo-500/20 text-indigo-500 hover:border-indigo-500/40'
+                         }`}
+                       >
+                         {bgAppliedToAll ? (
+                           <>
+                             <Check className="w-3.5 h-3.5" /> Background Applied to All Slides!
+                           </>
+                         ) : (
+                           <>
+                             <Layers className="w-3.5 h-3.5" /> Apply Active Background to All Slides
+                           </>
+                         )}
+                       </button>
+                     )}
 
                     {activeSlide?.bgImage && (
                       <div className="mt-2">
@@ -2818,6 +3507,474 @@ ${tagE}
                       </div>
                     ))}
                   </div>
+                </div>
+              </div>
+            )}
+
+            {rightPanelTab === 'browser' && (
+              <div className="flex flex-col h-full animate-in slide-in-from-right-2 duration-200">
+                {/* Real Browser Header & Controls */}
+                <div className={`p-3 border-b ${uiBorder} flex flex-col gap-2 shrink-0 ${uiBgSecondary}`}>
+                  <div className="flex items-center gap-1.5 justify-between">
+                    <div className="flex items-center gap-1.5 flex-1 min-w-0">
+                      {/* Traffic Lights like a real browser */}
+                      <div className="flex gap-1 mr-2 shrink-0">
+                        <div className="w-2.5 h-2.5 rounded-full bg-red-400" />
+                        <div className="w-2.5 h-2.5 rounded-full bg-yellow-400" />
+                        <div className="w-2.5 h-2.5 rounded-full bg-green-400" />
+                      </div>
+                      
+                      {/* Home Button */}
+                      <button 
+                        onClick={() => { 
+                          setBrowserSearchQuery(''); 
+                          setBrowserSearchInput(''); 
+                          setBrowserCurrentPage('home');
+                          setBrowserSearchResults([]);
+                        }} 
+                        className={`p-1.5 rounded transition-colors ${isDarkMode ? 'hover:bg-[#333] text-gray-300' : 'hover:bg-gray-100 text-gray-750'}`}
+                        title="Home"
+                      >
+                        <RefreshCw className="w-3.5 h-3.5" />
+                      </button>
+
+                      {/* URL Bar Search Form */}
+                      <form 
+                        onSubmit={(e) => { 
+                          e.preventDefault(); 
+                          const searchVal = browserSearchInput.trim();
+                          if (searchVal) {
+                            const isUrl = searchVal.startsWith('http://') || 
+                                          searchVal.startsWith('https://') || 
+                                          (searchVal.includes('.') && !searchVal.includes(' ') && !searchVal.includes('?'));
+                            
+                            if (isUrl) {
+                              let destination = searchVal;
+                              if (!/^https?:\/\//i.test(destination)) {
+                                destination = 'https://' + destination;
+                              }
+                              setBrowserSearchQuery(destination);
+                              setBrowserCurrentPage('iframe');
+                            } else {
+                              handleBrowserSearch(searchVal);
+                            }
+                          }
+                        }}
+                        className="flex-1 relative"
+                      >
+                        <input 
+                          type="text"
+                          value={browserSearchInput}
+                          onChange={(e) => setBrowserSearchInput(e.target.value)}
+                          placeholder={`Search ${browserSearchType === 'wikimedia' ? 'Wikimedia free media' : browserSearchType === 'wikipedia' ? 'Wikipedia pages' : 'Google Web insights'}...`}
+                          className={`w-full text-xs pl-3 pr-8 py-1.5 rounded-md border focus:ring-1 focus:ring-indigo-500 font-mono ${isDarkMode ? 'bg-[#1e1e1e] border-gray-700 text-white' : 'bg-white border-gray-200 text-gray-900'}`}
+                        />
+                        {browserSearchInput && (
+                          <button 
+                            type="button" 
+                            onClick={() => {
+                              setBrowserSearchInput('');
+                              setBrowserSearchQuery('');
+                              setBrowserCurrentPage('home');
+                              setBrowserSearchResults([]);
+                            }} 
+                            className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-650 text-xs font-bold"
+                          >
+                            ✕
+                          </button>
+                        )}
+                      </form>
+                    </div>
+                  </div>
+
+                  {/* High Quality Preset Tab bar for exact resource switching */}
+                  <div className="grid grid-cols-3 gap-1 p-0.5 bg-neutral-900/10 rounded-md border border-neutral-700/20 mt-1">
+                    {[
+                      { id: 'wikimedia', label: '🌐 Wikimedia', tooltip: 'Free Media Files' },
+                      { id: 'wikipedia', label: '🏛️ Wikipedia', tooltip: 'Abstract Text' },
+                      { id: 'google', label: '🔍 Web Search', tooltip: 'Slide Facts' }
+                    ].map((item) => (
+                      <button
+                        key={item.id}
+                        type="button"
+                        onClick={() => {
+                          setBrowserSearchType(item.id as any);
+                          if (browserSearchInput.trim()) {
+                            handleBrowserSearch(browserSearchInput.trim(), item.id as any);
+                          }
+                        }}
+                        className={`py-1 px-1 rounded text-[10px] sm:text-xs font-bold tracking-tight text-center transition-all ${
+                          browserSearchType === item.id 
+                            ? 'bg-indigo-600 text-white shadow-sm' 
+                            : 'text-gray-400 hover:text-gray-150 hover:bg-neutral-800/10'
+                        }`}
+                        title={item.tooltip}
+                      >
+                        {item.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Main Browser View */}
+                <div className="flex-1 flex flex-col min-h-0 relative">
+                  {/* Mode A: Native unblockable search results */}
+                  {browserCurrentPage === 'results' ? (
+                    <div className="flex-1 flex flex-col min-h-0 bg-neutral-900 text-white font-sans max-h-full">
+                      <div className="flex items-center justify-between px-3 py-1.5 bg-neutral-850 border-b border-neutral-850 text-[10px] text-gray-400 shrink-0">
+                        <span className="truncate max-w-[200px] uppercase font-bold tracking-widest font-mono text-[9px]">
+                          {browserSearchType === 'wikimedia' && `🌐 Wikimedia: "${browserSearchQuery}"`}
+                          {browserSearchType === 'wikipedia' && `🏛️ Wiki: "${browserSearchQuery}"`}
+                          {browserSearchType === 'google' && `🔍 Google: "${browserSearchQuery}"`}
+                        </span>
+                        <button 
+                          onClick={() => {
+                            setBrowserCurrentPage('home');
+                            setBrowserSearchResults([]);
+                            setBrowserSearchQuery('');
+                            setBrowserSearchInput('');
+                          }}
+                          className="hover:text-white transition font-bold"
+                        >
+                          ✕ Back to Panel
+                        </button>
+                      </div>
+
+                      {isBrowserSearching ? (
+                        <div className="flex-1 flex flex-col items-center justify-center p-6 gap-2 text-center h-full">
+                          <Loader2 className="w-8 h-8 animate-spin text-indigo-500" />
+                          <span className="text-[10px] text-gray-400 font-semibold font-mono tracking-wider">RETRIEVING LIVE RESEARCH RESULTS...</span>
+                        </div>
+                      ) : browserSearchError ? (
+                        <div className="flex-1 flex flex-col items-center justify-center p-6 text-center gap-3">
+                          <span className="text-xs text-red-400 bg-red-950/40 px-3 py-2 rounded-lg border border-red-900/30 font-semibold">{browserSearchError}</span>
+                          <button 
+                            onClick={() => handleBrowserSearch(browserSearchQuery)}
+                            className="bg-indigo-600 hover:bg-indigo-500 text-white text-xs px-3.5 py-1.5 rounded-lg transition font-bold shadow-md"
+                          >
+                            Retry Search
+                          </button>
+                        </div>
+                      ) : browserSearchResults.length === 0 ? (
+                        <div className="flex-1 flex flex-col items-center justify-center p-6 text-center">
+                          <span className="text-sm text-gray-400 mb-2">No matching presentational item found.</span>
+                          <span className="text-xs text-gray-500 mb-4 font-mono">Try simpler tags like "techno", "minimalist outline", "gradient blue"</span>
+                          <button 
+                            onClick={() => setBrowserCurrentPage('home')}
+                            className="text-xs text-indigo-400 hover:underline font-bold"
+                          >
+                            Go Back to Home
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="flex-1 overflow-y-auto p-4 custom-scrollbar">
+                          {/* Image Results (Wikimedia) */}
+                          {browserSearchType === 'wikimedia' && (
+                            <div className="grid grid-cols-2 gap-3">
+                              {browserSearchResults.map((img) => (
+                                <div 
+                                  key={img.id} 
+                                  className="relative group rounded-xl overflow-hidden bg-neutral-800 border border-neutral-700/80 shadow-md aspect-video cursor-pointer"
+                                  draggable="true"
+                                  onDragStart={(e) => {
+                                    e.dataTransfer.setData('image-url', img.urls.regular);
+                                    e.dataTransfer.setData('text/plain', img.urls.regular);
+                                    e.dataTransfer.effectAllowed = 'copy';
+                                  }}
+                                >
+                                  <img 
+                                    src={img.urls.small || img.urls.regular} 
+                                    alt={img.description} 
+                                    className="w-full h-full object-cover group-hover:scale-[1.03] transition-transform duration-200 pointer-events-none"
+                                    referrerPolicy="no-referrer"
+                                  />
+                                  <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/40 to-transparent opacity-0 group-hover:opacity-100 transition-opacity flex flex-col justify-end p-2.5 gap-2 select-none">
+                                    <span className="text-[10px] text-gray-200 truncate font-semibold" title={img.description}>{img.description}</span>
+                                    <span className="text-[8px] text-gray-400 truncate -mt-1">By: {img.user?.name || "Commons Contributor"}</span>
+                                    <div className="flex gap-1.5 items-center shrink-0">
+                                      <button 
+                                        onClick={() => {
+                                          const currentSlideIndex = slides.findIndex(s => s.id === activeSlideId);
+                                          insertImageToSlide(img.urls.regular, currentSlideIndex);
+                                        }}
+                                        className="flex-1 py-1 rounded bg-indigo-600 hover:bg-indigo-500 text-[10px] font-bold text-center text-white transition shadow-sm"
+                                      >
+                                        ➕ Insert
+                                      </button>
+                                      <button 
+                                        onClick={() => {
+                                          const currentSlideIndex = slides.findIndex(s => s.id === activeSlideId);
+                                          setImageAsSlideBackground(img.urls.regular, currentSlideIndex);
+                                        }}
+                                        className="flex-1 py-1 rounded bg-emerald-600 hover:bg-emerald-500 text-[10px] font-bold text-center text-white transition shadow-sm"
+                                      >
+                                        🎨 BG
+                                      </button>
+                                    </div>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+
+                          {/* Wikipedia Page Results */}
+                          {browserSearchType === 'wikipedia' && (
+                            <div className="space-y-4">
+                              {browserSearchResults.map((wiki_item, idx) => (
+                                <div key={idx} className="p-4 rounded-xl border border-neutral-800 bg-neutral-950 flex flex-col gap-3 shadow-md">
+                                  <h4 className="text-sm font-bold text-indigo-400 font-mono tracking-tight">{wiki_item.title}</h4>
+                                  
+                                  {wiki_item.image && (
+                                    <div className="w-full h-36 rounded-lg overflow-hidden border border-neutral-800/80 bg-neutral-900 relative">
+                                      <img 
+                                        src={wiki_item.image} 
+                                        alt={wiki_item.title} 
+                                        className="w-full h-full object-cover" 
+                                        referrerPolicy="no-referrer"
+                                      />
+                                    </div>
+                                  )}
+
+                                  <p className="text-xs text-gray-300 leading-relaxed font-sans">{wiki_item.snippet}</p>
+                                  
+                                  <div className="flex gap-2">
+                                    <button 
+                                      onClick={() => {
+                                        const currentSlideIndex = slides.findIndex(s => s.id === activeSlideId);
+                                        if (currentSlideIndex >= 0) {
+                                          setSlides(prev => {
+                                            const copy = [...prev];
+                                            const currentSlide = copy[currentSlideIndex];
+                                            const newEl = {
+                                              id: generateId(),
+                                              type: 'text' as const,
+                                              textRole: 'body' as const,
+                                              text: wiki_item.snippet,
+                                              x: 10,
+                                              y: 35,
+                                              w: 80,
+                                              h: 40,
+                                              align: 'left' as const,
+                                              useThemeColor: true
+                                            };
+                                            copy[currentSlideIndex] = {
+                                              ...currentSlide,
+                                              elements: [...currentSlide.elements, newEl]
+                                            };
+                                            return copy;
+                                          });
+                                        }
+                                      }}
+                                      className="flex-1 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-[10px] font-bold text-white text-center transition"
+                                    >
+                                      ➕ Insert Text Context
+                                    </button>
+                                    
+                                    {wiki_item.image && (
+                                      <>
+                                        <button 
+                                          onClick={() => {
+                                            const currentSlideIndex = slides.findIndex(s => s.id === activeSlideId);
+                                            insertImageToSlide(wiki_item.image, currentSlideIndex);
+                                          }}
+                                          className="py-1.5 px-3 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-[10px] font-bold text-white transition animate-in fade-in"
+                                        >
+                                          Image
+                                        </button>
+                                        <button 
+                                          onClick={() => {
+                                            const currentSlideIndex = slides.findIndex(s => s.id === activeSlideId);
+                                            setImageAsSlideBackground(wiki_item.image, currentSlideIndex);
+                                          }}
+                                          className="py-1.5 px-3 rounded-lg bg-purple-600 hover:bg-purple-500 text-[10px] font-bold text-white transition animate-in fade-in"
+                                        >
+                                          BG
+                                        </button>
+                                      </>
+                                    )}
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+
+                          {/* Google / Real-time Web Search Results */}
+                          {browserSearchType === 'google' && (
+                            <div className="space-y-4">
+                              {browserSearchResults.map((web_item, idx) => (
+                                <div key={idx} className="p-4 rounded-xl border border-neutral-800 bg-neutral-950 flex flex-col gap-2 shadow-md">
+                                  <a href={web_item.url} target="_blank" rel="noopener noreferrer" className="text-xs font-bold text-blue-400 hover:underline flex items-center gap-1">
+                                    🔗 {web_item.title}
+                                  </a>
+                                  <p className="text-[11px] text-gray-400 leading-relaxed font-sans">{web_item.snippet}</p>
+                                  
+                                  {web_item.facts && web_item.facts.length > 0 && (
+                                    <div className="mt-2 bg-neutral-900 p-2.5 rounded-lg border border-neutral-800 space-y-2 text-[11px]">
+                                      <div className="text-[9px] font-bold text-indigo-400 uppercase tracking-widest mb-1">Slide-Ready Bullet Points:</div>
+                                      {web_item.facts.map((fact: string, fidx: number) => (
+                                        <div key={fidx} className="flex justify-between items-start gap-2 bg-neutral-950 p-2 rounded border border-neutral-800/65 leading-relaxed">
+                                          <span className="text-gray-200 flex-1">{fact}</span>
+                                          <button
+                                            onClick={() => {
+                                              const currentSlideIndex = slides.findIndex(s => s.id === activeSlideId);
+                                              if (currentSlideIndex >= 0) {
+                                                setSlides(prev => {
+                                                  const copy = [...prev];
+                                                  const currentSlide = copy[currentSlideIndex];
+                                                  const newEl = {
+                                                    id: generateId(),
+                                                    type: 'text' as const,
+                                                    textRole: 'body' as const,
+                                                    text: fact,
+                                                    x: 10,
+                                                    y: 30 + (fidx * 16),
+                                                    w: 80,
+                                                    h: 15,
+                                                    align: 'left' as const,
+                                                    useThemeColor: true
+                                                  };
+                                                  copy[currentSlideIndex] = {
+                                                    ...currentSlide,
+                                                    elements: [...currentSlide.elements, newEl]
+                                                  };
+                                                  return copy;
+                                                });
+                                              }
+                                            }}
+                                            className="bg-indigo-600 hover:bg-indigo-500 text-[10px] text-white px-1.5 py-0.5 rounded shrink-0 font-bold transition shadow-sm"
+                                            title="Add fact to active slide"
+                                          >
+                                            ➕ Add
+                                          </button>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  )}
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  ) : browserCurrentPage === 'iframe' ? (
+                    /* The Real interactive Proxy iframe inside a styled viewport format */
+                    <div className="flex-1 h-full flex flex-col min-h-0 bg-neutral-950">
+                      <div className="flex items-center justify-between px-3 py-1.5 bg-neutral-900 border-b border-neutral-800 text-[10px] text-gray-400 shrink-0">
+                        <span className="truncate max-w-[130px] font-mono" title={browserSearchQuery}>{browserSearchQuery}</span>
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          {/* Selector for viewport mode */}
+                          <button 
+                            type="button"
+                            onClick={() => setBrowserViewportMode(browserViewportMode === 'mobile' ? 'desktop' : 'mobile')}
+                            className="text-[9px] bg-neutral-800 hover:bg-neutral-700 text-gray-300 px-2 py-1 rounded transition border border-neutral-700 uppercase font-semibold tracking-wider font-mono"
+                          >
+                            📱 {browserViewportMode === 'mobile' ? 'Desktop' : 'Mobile'}
+                          </button>
+                          <button 
+                            type="button"
+                            onClick={() => {
+                              setBrowserSearchQuery('');
+                              setBrowserSearchInput('');
+                              setBrowserCurrentPage('home');
+                            }}
+                            className="hover:text-white transition font-mono font-bold text-[10px] text-red-400 bg-red-950/20 hover:bg-red-950/40 px-2 py-1 rounded border border-red-900/30"
+                          >
+                            ✕ Close
+                          </button>
+                        </div>
+                      </div>
+                      
+                      <div className="flex-1 w-full h-full relative bg-neutral-950 flex flex-col items-center justify-center p-2.5 overflow-hidden">
+                        <div 
+                          className={`relative transition-all duration-300 w-full flex flex-col h-full bg-white shadow-2xl ${
+                            browserViewportMode === 'mobile' 
+                              ? 'max-w-[280px] max-h-[500px] rounded-[30px] border-[8px] border-neutral-800 overflow-hidden' 
+                              : 'rounded-lg overflow-hidden'
+                          }`}
+                        >
+                          {browserViewportMode === 'mobile' && (
+                            /* Speaker and camera bar */
+                            <div className="absolute top-1 left-1/2 -translate-x-1/2 w-20 h-3 bg-neutral-800 rounded-full z-50 flex items-center justify-center pointer-events-none">
+                              <div className="w-1 h-1 rounded-full bg-neutral-700 mr-2" />
+                              <div className="w-6 h-0.5 bg-neutral-700 rounded-full" />
+                            </div>
+                          )}
+                          
+                          <div className={`flex-1 w-full h-full relative ${browserViewportMode === 'mobile' ? 'pt-5' : ''} bg-white`}>
+                            <iframe 
+                              src={`/api/proxy-site?url=${encodeURIComponent(browserSearchQuery)}`}
+                              className="w-full h-full border-none"
+                              title="Interactive Image Search Frame"
+                              sandbox="allow-same-origin allow-scripts allow-forms allow-popups"
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    /* Dashboard with quick links and interactive tab selectors */
+                    <div className="flex-1 flex flex-col items-center justify-center p-6 text-center overflow-y-auto">
+                      <span className="text-[10px] bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 shadow-sm px-2.5 py-0.5 rounded-full tracking-wider uppercase mb-5 font-bold font-mono">Sandbox Search Centre</span>
+
+                      <p className={`text-xs max-w-[250px] mb-6 ${uiTextMuted}`}>
+                        Select search resources below, lookup layouts, and append royalty-free content & vectors instantly to your active presentation!
+                      </p>
+
+                      <div className="w-full max-w-[270px] space-y-4 text-left">
+                        <div className="text-[10px] font-bold uppercase tracking-wider text-gray-400 pl-1">⚡ Research Generators</div>
+                        <div className="grid grid-cols-2 gap-2">
+                          <button 
+                            type="button"
+                            onClick={() => {
+                              setBrowserSearchInput('historical maps and charts');
+                              handleBrowserSearch('historical maps and charts', 'wikimedia');
+                            }}
+                            className={`flex flex-col items-center justify-center p-3 rounded-lg border text-xs font-semibold transition ${isDarkMode ? 'bg-[#1e1e1e] border-gray-800 hover:border-indigo-500 hover:bg-[#252525] text-white' : 'bg-gray-50 border-gray-200 hover:border-indigo-500 hover:bg-indigo-50/20 text-gray-800'}`}
+                          >
+                            <span className="text-xl mb-1">🌐</span> Wiki Photos
+                          </button>
+                          
+                          <button 
+                            type="button"
+                            onClick={() => {
+                              setBrowserSearchInput('infographic illustration diagrams');
+                              handleBrowserSearch('infographic illustration diagrams', 'wikimedia');
+                            }}
+                            className={`flex flex-col items-center justify-center p-3 rounded-lg border text-xs font-semibold transition ${isDarkMode ? 'bg-[#1e1e1e] border-gray-800 hover:border-indigo-500 hover:bg-[#252525] text-white' : 'bg-gray-50 border-gray-200 hover:border-indigo-500 hover:bg-indigo-50/20 text-gray-800'}`}
+                          >
+                            <span className="text-xl mb-1">🎨</span> Wiki Graphics
+                          </button>
+
+                          <button 
+                            type="button"
+                            onClick={() => {
+                              setBrowserSearchInput('artificial intelligence technology');
+                              handleBrowserSearch('artificial intelligence technology', 'wikipedia');
+                            }}
+                            className={`flex flex-col items-center justify-center p-3 rounded-lg border text-xs font-semibold transition ${isDarkMode ? 'bg-[#1e1e1e] border-gray-800 hover:border-indigo-500 hover:bg-[#252525] text-white' : 'bg-gray-50 border-gray-200 hover:border-indigo-500 hover:bg-indigo-50/20 text-gray-800'}`}
+                          >
+                            <span className="text-xl mb-1">🏛️</span> Wiki Insights
+                          </button>
+
+                          <button 
+                            type="button"
+                            onClick={() => {
+                              setBrowserSearchInput('latest startup industry trends');
+                              handleBrowserSearch('latest startup industry trends', 'google');
+                            }}
+                            className={`flex flex-col items-center justify-center p-3 rounded-lg border text-xs font-semibold transition ${isDarkMode ? 'bg-[#1e1e1e] border-gray-800 hover:border-indigo-500 hover:bg-[#252525] text-white' : 'bg-gray-50 border-gray-200 hover:border-indigo-500 hover:bg-indigo-50/20 text-gray-800'}`}
+                          >
+                            <span className="text-xl mb-1">🔍</span> Google Trends
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className={`mt-8 p-3.5 rounded-xl border text-[11px] font-medium leading-relaxed max-w-[270px] border-dashed ${isDarkMode ? 'bg-[#222]/40 border-gray-800 text-gray-400' : 'bg-indigo-50/40 border-indigo-100 text-gray-600'}`}>
+                        💡 <span className="font-bold text-indigo-500">Fast Creator Access:</span> Click the presets above or enter customized queries. Type in the text bar to research any topic on the fly!
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
             )}
