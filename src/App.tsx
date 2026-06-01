@@ -142,6 +142,19 @@ Command Specifications:
   }
 };
 
+const readJSONResponse = async (response: Response) => {
+  const contentType = response.headers.get('content-type') || '';
+  if (contentType.includes('application/json')) {
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || `Request failed with status ${response.status}`);
+    return data;
+  }
+
+  const text = await response.text().catch(() => '');
+  const message = text.trim().slice(0, 180) || `Request failed with status ${response.status}`;
+  throw new Error(message);
+};
+
 const generateFullDeck = async (topic, aiSettings) => {
   return postJSON('/api/ai/deck', { topic, aiSettings });
 };
@@ -1985,7 +1998,7 @@ ${tagE}
     try {
       if (activeType === 'wikimedia') {
         const res = await fetch(`/api/image-search?q=${encodeURIComponent(term)}`);
-        const data = await res.json();
+        const data = await readJSONResponse(res);
         if (data.results) {
           setBrowserSearchResults(data.results);
         } else {
@@ -2001,7 +2014,7 @@ ${tagE}
             aiSettings: sanitizeAiSettings()
           })
         });
-        const data = await res.json();
+        const data = await readJSONResponse(res);
         if (data.results) {
           setBrowserSearchResults(data.results);
         } else {
