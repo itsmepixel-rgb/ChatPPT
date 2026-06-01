@@ -1,5 +1,6 @@
 {
   "name": "ChatPPT",
   "description": "Create professional presentations with AI. Generate slides, rewrite text, and create images instantly.",
-  "requestFramePermissions": []
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }
