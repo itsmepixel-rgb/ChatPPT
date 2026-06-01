@@ -19,13 +19,13 @@
 Below are the key interfaces you will interact with when using ChatPPT.
 
 <p align="center">
-  <img src="docs/screenshots/dashboard.jpg" alt="ChatPPT Dashboard" width="900" style="border-radius: 8px; border: 1px solid #333; margin-bottom: 20px;" />
+  <img src="docs/dashboard.jpg" alt="ChatPPT Dashboard" width="900" style="border-radius: 8px; border: 1px solid #333; margin-bottom: 20px;" />
   <br />
   <em><strong>Drafting Dashboard:</strong> Prompt-to-presentation workflows combined with rich aesthetic templates.</em>
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/canvas.jpg" alt="Canvas Workspace" width="900" style="border-radius: 8px; border: 1px solid #333; margin-bottom: 20px;" />
+  <img src="docs/canvas.jpg" alt="Canvas Workspace" width="900" style="border-radius: 8px; border: 1px solid #333; margin-bottom: 20px;" />
   <br />
   <em><strong>Visual Canvas Layer:</strong> Drag, resize, layer, and style elements with live layout snapping.</em>
 </p>
