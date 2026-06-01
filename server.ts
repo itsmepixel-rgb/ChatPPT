@@ -1525,13 +1525,15 @@ The JSON format must be EXACTLY: [
     }
 
     // Only start long-running listeners if not running inside serverless host environment like Vercel
-    if (process.env.NODE_ENV !== "production" || process.env.RUN_STANDALONE === "true" || !process.env.VERCEL) {
+    if (!process.env.VERCEL) {
       app.listen(PORT, "0.0.0.0", () => {
         console.log(`Server running on http://localhost:${PORT}`);
       });
     }
   }
 
-  startServer();
+  if (!process.env.VERCEL) {
+    startServer();
+  }
 
   export default app;
