@@ -7,10 +7,8 @@ import { GoogleGenAI } from "@google/genai";
 
 dotenv.config();
 
-async function startServer() {
-  const app = express();
-  const PORT = 3000;
-  app.use(express.json({ limit: "25mb" }));
+const app = express();
+app.use(express.json({ limit: "25mb" }));
 
   type Provider = "gemini" | "openai" | "claude" | "ollama";
   type AiSettings = {
@@ -1504,24 +1502,32 @@ The JSON format must be EXACTLY: [
     res.json({ status: "ok" });
   });
 
-  // Vite middleware for development
-  if (process.env.NODE_ENV !== "production") {
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: "spa",
-    });
-    app.use(vite.middlewares);
-  } else {
-    const distPath = path.join(process.cwd(), 'dist');
-    app.use(express.static(distPath));
-    app.get('*', (req, res) => {
-      res.sendFile(path.join(distPath, 'index.html'));
-    });
+  async function startServer() {
+    const PORT = Number(process.env.PORT) || 3000;
+
+    // Vite middleware for development
+    if (process.env.NODE_ENV !== "production") {
+      const vite = await createViteServer({
+        server: { middlewareMode: true },
+        appType: "spa",
+      });
+      app.use(vite.middlewares);
+    } else {
+      const distPath = path.join(process.cwd(), 'dist');
+      app.use(express.static(distPath));
+      app.get('*', (req, res) => {
+        res.sendFile(path.join(distPath, 'index.html'));
+      });
+    }
+
+    // Only start long-running listeners if not running inside serverless host environment like Vercel
+    if (process.env.NODE_ENV !== "production" || process.env.RUN_STANDALONE === "true" || !process.env.VERCEL) {
+      app.listen(PORT, "0.0.0.0", () => {
+        console.log(`Server running on http://localhost:${PORT}`);
+      });
+    }
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on http://localhost:${PORT}`);
-  });
-}
+  startServer();
 
-startServer();
+  export default app;
