@@ -14,6 +14,10 @@
 
 ---
 
+Try it here: chat-ppt.vercel.app
+
+---
+
 ## 📸 Presentation Workspace Preview
 
 Below are the key interfaces you will interact with when using ChatPPT.
