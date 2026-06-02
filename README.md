@@ -14,7 +14,7 @@
 
 ---
 
-Try it here: chat-ppt.vercel.app
+Try it here: http://chat-ppt.vercel.app
 
 ---
 
